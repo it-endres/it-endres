@@ -1,0 +1,196 @@
+## This script uses rabbitmq and powershell to sync a mariadb to active directory
+## 
+
+
+## https://www.powershellgallery.com/packages/RabbitMQTools/1.5.1
+
+Install-Module PSRabbitMQ -Force
+sleep 1
+
+Import-Module PSRabbitMQ
+sleep 1
+
+Install-Module -Name RabbitMQTools -Force
+# Install-Module -Name RabbitMQTools
+sleep 1
+
+Import-Module RabbitMQTools -force
+sleep 1
+
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+sleep 1
+
+Add-Type -AssemblyName System.Web
+sleep 1
+
+
+##read-host -assecurestring | convertfrom-securestring | out-file C:\tmp\cred.txt
+
+$timer = 15
+$i = 1
+
+$OU_Path = "OU=USERS,DC=yourdomain,DC=,DC="
+$OU_Path_MA = "OU=example4,OU=User,OU=example1,OU=yourdomain,DC=yourdc,DC=,DC="
+$profilePath = "\\yourdomain\Profil\Profildaten\"
+$homeDrive = "H"
+$homeDirectory = "\\yourdomain\Daten\Userdaten\"
+
+$user = "RabbitPS"
+$pwd = "C:\tmp\cred.txt"
+$credRabbit = New-Object -TypeName System.Management.Automation.PSCredential $User, (Get-Content $pwd | ConvertTo-SecureString)
+
+Register-RabbitMQServer -BaseUri "https://rabbitmq.yourdomain:15671"
+
+$Params = @{
+    BaseUri = "https://rabbitmq.yourdomain:15671"
+    Credential = $credRabbit
+}
+
+$QueueName = "yourqueue"
+
+
+
+### Logfile Config
+
+$path = "C:\tmp"
+$date = get-date -format "yyyy-MM-dd"
+$file = ("Log_RabbitMQ_AD_" + $date + ".log")
+$logfile = $path + "\" + $file
+
+function Write-Log([string]$logtext, [int]$level=0)
+{
+	$logdate = get-date -format "yyyy-MM-dd HH:mm:ss"
+	if($level -eq 0)
+	{
+		$logtext = "[INFO] " + $logtext
+		$text = "["+$logdate+"] - " + $logtext
+		Write-Host $text
+	}
+	if($level -eq 1)
+	{
+		$logtext = "[AddUser] " + $logtext
+		$text = "["+$logdate+"] - " + $logtext
+		Write-Host $text -ForegroundColor Green
+	}
+	if($level -eq 2)
+	{
+		$logtext = "[ChangeUser] " + $logtext
+		$text = "["+$logdate+"] - " + $logtext
+		Write-Host $text -ForegroundColor Yellow
+	}
+	if($level -eq 3)
+	{
+		$logtext = "[NewPW] " + $logtext
+		$text = "["+$logdate+"] - " + $logtext
+		Write-Host $text -ForegroundColor Red
+	}
+	if($level -eq 4)
+	{
+		$logtext = "[WrongLogin] " + $logtext
+		$text = "["+$logdate+"] - " + $logtext
+		Write-Host $text -ForegroundColor Red
+	}
+	$text >> $logfile
+}
+
+# Log Bsp:
+# log something
+#Write-Log "this is a simple log test"
+
+# create warning log entry
+#Write-Log "this is a simple log test" 2
+
+### Ende Logfile Config
+
+# Start log
+Write-Log "Scriptstart"
+
+While($true){ 
+    While($Incoming = Get-RabbitMQMessage @params -VirtualHost / -Name $QueueName -count 1){
+        $Incoming = Get-RabbitMQMessage @params -VirtualHost / -Name $QueueName -count 1 -Remove
+        $IncomingData = $Incoming.payload | ConvertFrom-Json
+        IF ($($IncomingData.SamAccountName) -match "kh[6-9][1-9][a-z][a-z][a-z]") {
+            ###AD User - create if not exist:
+            $CheckUser = Get-ADUser -LDAPFilter "(sAMAccountName=$($IncomingData.SamAccountName))"
+            IF ($CheckUser -eq $Null) {
+                $newUser = @{
+                    Path = $OU_Path
+                    UserPrincipalName = $IncomingData.SamAccountName+"@yourdomain"
+                    SamAccountName = $IncomingData.SamAccountName
+                    profilePath = $profilePath+$($IncomingData.SamAccountName)
+                    homeDrive = $homeDrive
+                    homeDirectory = $homeDirectory+$($IncomingData.SamAccountName)
+                    name = $IncomingData.changeuser.displayname
+                }
+                New-ADUser @newUser
+                Write-Log "$($IncomingData.SamAccountName), $($IncomingData.changeuser.displayname)" 1
+            }
+
+            ###AD User - changes:
+            if ($IncomingData.changeUser.DisplayName -match ".+") {
+                Get-ADUser -Identity $IncomingData.SamAccountName | Rename-ADObject -NewName $IncomingData.changeUser.DisplayName
+                Get-ADUser -Identity $IncomingData.SamAccountName | Set-ADUser -DisplayName $IncomingData.changeUser.DisplayName
+                Write-Log "$($IncomingData.SamAccountName) NewDisplayName $($IncomingData.changeUser.DisplayName)" 2
+            }
+
+            if ($IncomingData.changeUser.GivenName -match ".+") {
+                Get-ADUser -Identity $IncomingData.SamAccountName | Set-ADUser -GivenName $IncomingData.changeUser.GivenName
+                Write-Log "$($IncomingData.SamAccountName) NewGivenName $($IncomingData.changeUser.GivenName)" 2
+            }
+
+            if ($IncomingData.changeUser.Surname -match ".+") {
+                Get-ADUser -Identity $IncomingData.SamAccountName | Set-ADUser -SurName $IncomingData.changeUser.Surname
+                Write-Log "$($IncomingData.SamAccountName) NewSurName $($IncomingData.changeUser.Surname)" 2
+            }
+
+
+            if ($IncomingData.changeUser.Office -match ".+") {
+                Get-ADUser -Identity $IncomingData.SamAccountName | Set-ADUser -Office $IncomingData.changeUser.Office
+                Write-Log "$($IncomingData.SamAccountName) NewOffice $($IncomingData.changeUser.Office)" 2
+            }
+
+            if ($IncomingData.changeUser.emailaddress -match ".+") {
+                Get-ADUser -Identity $IncomingData.SamAccountName | Set-ADUser -EmailAddress $IncomingData.changeUser.emailaddress
+                Write-Log "$($IncomingData.SamAccountName) NewEmail $($IncomingData.changeUser.emailaddress)" 2
+            }
+
+            if ($IncomingData.changeUser.info -match ".+") {
+                Get-ADUser -Identity $IncomingData.SamAccountName | Set-ADUser -replace @{info=$IncomingData.changeUser.info}
+                Write-Log "$($IncomingData.SamAccountName) NewInfo $($IncomingData.changeUser.info)" 2
+                $CheckInfo = Get-ADUser $($IncomingData.SamAccountName) -Properties info | select -ExpandProperty info
+                $UserDN  = (Get-ADUser -Identity $($IncomingData.SamAccountName)).distinguishedName
+                IF ($CheckInfo -match ".*staff.*|.*prof.*") {
+                    Move-ADObject -Identity $UserDN -TargetPath $OU_Path_MA
+                    Write-Log "$($IncomingData.SamAccountName) Move-ADObject $OU_Path_MA" 2
+                    Add-ADGroupMember -Identity “example1” -Member $($IncomingData.SamAccountName)
+                    Add-ADGroupMember -Identity “example2” -Member $($IncomingData.SamAccountName)
+                    Write-Log "$($IncomingData.SamAccountName) Add-ADGroupMember example1" 2
+                }
+                ELSE
+                {
+                    Move-ADObject -Identity $UserDN -TargetPath $OU_Path
+                    Write-Log "$($IncomingData.SamAccountName) Move-ADObject $OU_Path" 3
+                    Remove-ADGroupMember -Identity “example1” -Member $($IncomingData.SamAccountName) -Confirm:$false
+                    #Remove-ADGroupMember -Identity “example2” -Member $($IncomingData.SamAccountName) -Confirm:$false
+                    Write-Log "$($IncomingData.SamAccountName) Remove-ADGroupMember example1" 3
+                }
+
+            }
+
+            ###AD User - Change PW
+            if ($IncomingData.Password -match ".+") {
+                Set-ADAccountPassword -Identity $IncomingData.SamAccountName -Reset -NewPassword (ConvertTo-SecureString -AsPlainText $IncomingData.Password -Force)
+                Get-ADUser -Identity $IncomingData.SamAccountName | Set-ADUser -Enabled $true -ChangePasswordAtLogon $false -PasswordNeverExpires $true -CannotChangePassword  $true
+                Write-Log "$($IncomingData.SamAccountName) NewPW" 3
+            }
+        }
+        ELSE {
+        Write-Log "$($IncomingData.SamAccountName)" 4
+        }
+    }
+    sleep $timer
+    
+    ### control if loop runs
+    #$i
+    #$i++
+}
